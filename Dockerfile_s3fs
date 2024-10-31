@@ -1,0 +1,60 @@
+FROM mcr.microsoft.com/playwright:v1.27.1-focal as envs
+
+# Set arguments to be used throughout the image
+ARG OPERATOR_HOME="/home/op/app"
+ARG OPERATOR_USER="op"
+ARG OPERATOR_UID="50000"
+
+# Set arguments for access s3 bucket to mount using s3fs
+ARG BUCKET_NAME
+ARG S3_ENDPOINT="https://storage.yandexcloud.net"
+
+# Set arguments for playwright parallelism and sharding
+ARG PW_WORKERS_COUNT=1
+ARG PW_SHARD_COUNT=1
+ARG PW_SHARD_INDEX=1
+
+# Add environment variables based on arguments
+ENV NODE_ENV=production
+ENV OPERATOR_HOME ${OPERATOR_HOME}
+ENV OPERATOR_USER ${OPERATOR_USER}
+ENV OPERATOR_UID ${OPERATOR_UID}
+ENV BUCKET_NAME ${BUCKET_NAME}
+ENV S3_ENDPOINT ${S3_ENDPOINT}
+
+ENV PW_WORKERS_COUNT ${PW_WORKERS_COUNT}
+ENV PW_SHARD_COUNT ${PW_SHARD_COUNT}
+ENV PW_SHARD_INDEX ${PW_SHARD_INDEX}
+
+# Add user for code to be run as
+RUN useradd -ms /bin/bash -d ${OPERATOR_HOME} --uid ${OPERATOR_UID} ${OPERATOR_USER}
+
+FROM envs as dist
+
+# Install s3fs
+RUN set -ex && \
+    apt-get update && \
+    apt install s3fs -y
+
+# Setup s3fs configs
+RUN echo "s3fs#${BUCKET_NAME} ${OPERATOR_HOME}/s3_reports fuse user,_netdev,allow_other,nonempty,umask=000,uid=${OPERATOR_UID},gid=${OPERATOR_UID},passwd_file=${OPERATOR_HOME}/.s3fs-creds,use_cache=/tmp,url=${S3_ENDPOINT} 0 0" >> /etc/fstab
+RUN sed -i '/user_allow_other/s/^#//g' /etc/fuse.conf
+
+# Copy app folder
+USER ${OPERATOR_USER}
+WORKDIR ${OPERATOR_HOME}
+COPY --chown=${OPERATOR_USER} . .
+RUN npm install
+RUN npx playwright install
+
+RUN printf '#!/usr/bin/env bash  \n\
+echo ${ACCESS_KEY_ID}:${SECRET_ACCESS_KEY} > ${OPERATOR_HOME}/.s3fs-creds \n\
+chmod 400 ${OPERATOR_HOME}/.s3fs-creds \n\
+mkdir ${OPERATOR_HOME}/s3_reports \n\
+mount ${OPERATOR_HOME}/s3_reports \n\
+npx playwright test --workers=${PW_WORKERS_COUNT} --shard=${PW_SHARD_INDEX}/${PW_SHARD_COUNT}\
+' >> ${OPERATOR_HOME}/entrypoint.sh
+
+RUN chmod 700 ${OPERATOR_HOME}/entrypoint.sh
+#ENTRYPOINT [ "/home/op/app/entrypoint.sh" ]
+CMD echo 1
